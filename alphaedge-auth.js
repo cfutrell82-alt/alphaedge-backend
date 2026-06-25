@@ -30,7 +30,10 @@ const cors       = require('cors');
 
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
+app.use(cors({ 
+  origin: ['https://alphaedgetrading.site', 'http://alphaedgetrading.site', 'https://cfutrell82-alt.github.io'],
+  credentials: true 
+}));
 
 
 // ─────────────────────────────────────────────
@@ -632,7 +635,7 @@ app.listen(PORT, () => {
  *    At the top of alphaedge-dashboard.html <script>:
  *
  *    const token = localStorage.getItem('ae_token');
- *    if (!token) window.location.href = 'alphaedge-trading.html';
+ *    if (!token) window.location.href = 'index.html';
  *    // Optionally verify token with /api/auth/me and redirect if invalid
  *
  * 5. GOOGLE OAUTH (optional)
