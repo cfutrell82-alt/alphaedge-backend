@@ -1,0 +1,49 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String   @id @default(uuid())
+  firstName       String
+  lastName        String
+  email           String   @unique
+  passwordHash    String
+  plan            String   @default("free")
+  status          String   @default("active")
+  emailVerified   Boolean  @default(false)
+  verifyToken     String?
+  resetToken      String?
+  resetExpires    DateTime?
+  stripeCustomerId String?
+  telegramUserId  String?
+  createdAt       DateTime @default(now())
+  lastLogin       DateTime?
+}
+
+model Wallet {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  btcBalance  Float    @default(0)
+  ethBalance  Float    @default(0)
+  usdcBalance Float    @default(0)
+  solBalance  Float    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Transaction {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String
+  currency  String
+  amount    Float
+  usdValue  Float
+  status    String   @default("pending")
+  txHash    String?
+  createdAt DateTime @default(now())
+}
