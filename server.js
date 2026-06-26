@@ -32,17 +32,10 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
     env: { ...process.env }
   });
   bot.on('close', code => console.log(`Telegram bot exited with code ${code}`));
-  console.log(`Telegram bot → starting AlphaEdgeProBot`);
+  console.log(`Telegram bot → AlphaEdgeProBot starting...`);
 } else {
   console.log(`Telegram bot skipped — TELEGRAM_BOT_TOKEN not set`);
 }
 
-// Start signals server if token is set
-if (process.env.TELEGRAM_BOT_TOKEN) {
-  const signals = spawn('node', ['alphaedge-signals.js'], {
-    stdio: 'inherit',
-    env: { ...process.env, PORT: String(parseInt(mainPort) + 2) }
-  });
-  signals.on('close', code => console.log(`Signals server exited with code ${code}`));
-  console.log(`Signals server → port ${parseInt(mainPort) + 2}`);
-}
+// NOTE: alphaedge-signals.js disabled — bot handled by alphaedge-telegram-bot.js
+console.log(`Signals engine → integrated into telegram bot`);
