@@ -9,7 +9,8 @@
     "start:signals": "node alphaedge-signals.js",
     "dev:auth":      "nodemon alphaedge-auth.js",
     "dev:stripe":    "nodemon alphaedge-stripe-server.js",
-    "dev:signals":   "nodemon alphaedge-signals.js"
+    "dev:signals":   "nodemon alphaedge-signals.js",
+          "build": "prisma generate"
   },
   "dependencies": {
     "express":                  "^4.18.2",
