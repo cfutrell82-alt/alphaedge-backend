@@ -23,6 +23,10 @@ model User {
   telegramUserId  String?
   createdAt       DateTime @default(now())
   lastLogin       DateTime?
+  googleId         String?  @unique
+  avatar           String?
+  stripeCustomerId String?
+  subscriptionId   String?
 }
 
 model Wallet {
