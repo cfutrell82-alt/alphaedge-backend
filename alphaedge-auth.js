@@ -462,3 +462,73 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`AlphaEdge Auth API running on port ${PORT}`);
 });
+
+// ─────────────────────────────────────────────
+// GOOGLE OAUTH
+// ─────────────────────────────────────────────
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REDIRECT = 'https://alphaedge-backend-production.up.railway.app/api/auth/google/callback';
+
+app.get('/api/auth/google', (req, res) => {
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT,
+    response_type: 'code',
+    scope: 'openid email profile',
+    access_type: 'offline',
+    prompt: 'select_account'
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+
+app.get('/api/auth/google/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.redirect(`${FRONTEND_URL}/alphaedge-login.html?error=google_failed`);
+  try {
+    // Exchange code for tokens
+    const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
+      code,
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      redirect_uri: GOOGLE_REDIRECT,
+      grant_type: 'authorization_code'
+    });
+    const { access_token } = tokenRes.data;
+
+    // Get user info
+    const userRes = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: { Authorization: `Bearer ${access_token}` }
+    });
+    const { email, given_name, family_name, picture } = userRes.data;
+
+    // Find or create user
+    let user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          firstName: given_name || 'User',
+          lastName: family_name || '',
+          email: email.toLowerCase(),
+          passwordHash: await require('bcryptjs').hash(crypto.randomBytes(32).toString('hex'), 12),
+          plan: 'free',
+          status: 'active',
+          emailVerified: true,
+          avatar: picture || null
+        }
+      });
+      await prisma.wallet.create({ data: { userId: user.id } });
+      await sendEmail(email, 'Welcome to AlphaEdge! 🚀', welcomeEmail(given_name || 'Trader'));
+      console.log(`[GOOGLE AUTH] New user: ${email}`);
+    } else {
+      console.log(`[GOOGLE AUTH] Existing user: ${email}`);
+    }
+
+    const token = signToken(user.id);
+    // Redirect to dashboard with token
+    res.redirect(`${FRONTEND_URL}/alphaedge-dashboard.html?token=${token}&user=${encodeURIComponent(JSON.stringify(safeUser(user)))}`);
+  } catch(err) {
+    console.error('[GOOGLE AUTH ERROR]', err.message);
+    res.redirect(`${FRONTEND_URL}/alphaedge-login.html?error=google_failed`);
+  }
+});
