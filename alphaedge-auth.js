@@ -25,14 +25,24 @@ const FRONTEND_URL = process.env.CLIENT_URL || 'https://alphaedgetrading.site';
 // ─────────────────────────────────────────────
 // EMAIL TRANSPORTER
 // ─────────────────────────────────────────────
+const port = parseInt(process.env.EMAIL_PORT) || 465;
 const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST || 'smtp.sendgrid.net',
-  port: parseInt(process.env.EMAIL_PORT) || 587,
-  secure: false,
+  host: process.env.EMAIL_HOST || 'smtp.resend.com',
+  port: port,
+  secure: port === 465,
   auth: {
-    user: process.env.EMAIL_USER || 'apikey',
+    user: process.env.EMAIL_USER || 'resend',
     pass: process.env.EMAIL_PASS,
   },
+});
+
+// Verify transporter on startup
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('[EMAIL] SMTP connection failed:', error.message);
+  } else {
+    console.log('[EMAIL] SMTP ready to send emails');
+  }
 });
 
 const FROM = process.env.EMAIL_FROM || 'support@alphaedgetrading.site';
