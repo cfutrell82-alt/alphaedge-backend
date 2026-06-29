@@ -277,9 +277,7 @@ app.post('/api/user/update-plan', async (req, res) => {
   res.json({ message: 'Plan updated.' });
 });
 
-app.get('/api/auth/google', (req, res) => {
-  res.status(501).json({ error: 'Google OAuth not yet configured.' });
-});
+// Google OAuth routes defined below
 
 // ─────────────────────────────────────────────
 // WALLET ROUTES
