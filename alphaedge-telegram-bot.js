@@ -3,282 +3,262 @@ const TelegramBot = require('node-telegram-bot-api');
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+
+// Use polling=false and handle conflicts gracefully
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
+  polling: {
+    interval: 2000,
+    autoStart: true,
+    params: { timeout: 10 }
+  }
+});
+
+// Handle polling errors gracefully without crashing
+bot.on('polling_error', (error) => {
+  if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+    console.log('[BOT] Another instance detected — waiting to take over...');
+    // Stop and restart after delay to avoid conflict
+    setTimeout(() => {
+      bot.stopPolling().then(() => {
+        setTimeout(() => {
+          bot.startPolling();
+          console.log('[BOT] Polling restarted successfully');
+        }, 5000);
+      });
+    }, 3000);
+  } else if (error.code === 'ETELEGRAM' && (error.message.includes('502') || error.message.includes('504'))) {
+    // Gateway errors are temporary — just log and continue
+    console.log('[BOT] Telegram gateway error (temporary) — continuing...');
+  } else {
+    console.error('[BOT] Polling error:', error.message);
+  }
+});
 
 const FRONTEND_URL = process.env.CLIENT_URL || 'https://alphaedgetrading.site';
-const SIGNAL_SECRET = process.env.SIGNAL_SECRET || 'alphaedge_signal_secret';
+
+// ─────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────
+function escapeMarkdown(text) {
+  return String(text).replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
+}
+
+async function getUserByTelegramId(telegramId) {
+  return prisma.user.findFirst({ where: { telegramId: String(telegramId) } });
+}
+
+// ─────────────────────────────────────────────
+// KEYBOARDS
+// ─────────────────────────────────────────────
+const mainMenu = {
+  reply_markup: {
+    keyboard: [
+      ['📡 Signals', '📊 Markets'],
+      ['💰 Account', '🔗 Connect Account'],
+      ['💻 Terminal', '❓ Help']
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false
+  }
+};
+
+const signalsMenu = {
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: '📈 Stocks', callback_data: 'sig_stocks' }, { text: '💱 Forex', callback_data: 'sig_forex' }],
+      [{ text: '₿ Crypto', callback_data: 'sig_crypto' }, { text: '⚙️ Options', callback_data: 'sig_options' }],
+      [{ text: '🏠 Main Menu', callback_data: 'main_menu' }]
+    ]
+  }
+};
+
+// ─────────────────────────────────────────────
+// SIGNAL DATA
+// ─────────────────────────────────────────────
+const liveSignals = {
+  stocks: [
+    { ticker: 'NVDA', action: 'BUY', entry: '$1,142.50', tp: '$1,190.00', sl: '$1,110.00', time: '2m ago' },
+    { ticker: 'AAPL', action: 'BUY', entry: '$198.30', tp: '$207.00', sl: '$193.00', time: '14m ago' },
+    { ticker: 'TSLA', action: 'SELL', entry: '$185.60', tp: '$172.00', sl: '$192.00', time: '31m ago' },
+  ],
+  forex: [
+    { ticker: 'EUR/USD', action: 'SELL', entry: '1.08420', tp: '1.07900', sl: '1.08750', time: '8m ago' },
+    { ticker: 'GBP/JPY', action: 'BUY', entry: '191.240', tp: '193.500', sl: '189.800', time: '22m ago' },
+    { ticker: 'USD/JPY', action: 'BUY', entry: '157.840', tp: '159.500', sl: '156.800', time: '45m ago' },
+  ],
+  crypto: [
+    { ticker: 'BTC/USD', action: 'BUY', entry: '$67,420', tp: '$71,000', sl: '$65,800', time: '1m ago' },
+    { ticker: 'ETH/USD', action: 'BUY', entry: '$3,812', tp: '$4,100', sl: '$3,650', time: '18m ago' },
+    { ticker: 'SOL/USD', action: 'BUY', entry: '$168.40', tp: '$185.00', sl: '$158.00', time: '35m ago' },
+  ],
+  options: [
+    { ticker: 'SPX 0DTE', action: 'BUY', entry: '$5,421', tp: '$5,480', sl: '$5,400', time: '5m ago' },
+    { ticker: 'QQQ PUT', action: 'BUY', entry: '$418.90', tp: '$410.00', sl: '$422.00', time: '28m ago' },
+  ]
+};
+
+function formatSignals(market) {
+  const signals = liveSignals[market] || [];
+  let msg = `*⚡ ${market.toUpperCase()} SIGNALS*\n\n`;
+  signals.forEach(s => {
+    const emoji = s.action === 'BUY' ? '🟢' : '🔴';
+    msg += `${emoji} *${escapeMarkdown(s.ticker)}* — ${s.action}\n`;
+    msg += `   Entry: \`${escapeMarkdown(s.entry)}\`\n`;
+    msg += `   TP: \`${escapeMarkdown(s.tp)}\` | SL: \`${escapeMarkdown(s.sl)}\`\n`;
+    msg += `   _${s.time}_\n\n`;
+  });
+  msg += `📊 [View Dashboard](${FRONTEND_URL}/alphaedge-dashboard.html)`;
+  return msg;
+}
+
+// ─────────────────────────────────────────────
+// COMMANDS
+// ─────────────────────────────────────────────
+bot.onText(/\/start/, async (msg) => {
+  const name = msg.from.first_name || 'Trader';
+  const user = await getUserByTelegramId(msg.from.id);
+  const plan = user ? user.plan?.toUpperCase() || 'FREE' : null;
+
+  let welcome = `👋 *Welcome to AlphaEdge, ${escapeMarkdown(name)}\\!*\n\n`;
+  if (user) {
+    welcome += `✅ Account connected \\— Plan: *${escapeMarkdown(plan)}*\n\n`;
+  } else {
+    welcome += `🔗 Connect your account to unlock signals:\n/connect\n\n`;
+  }
+  welcome += `*What I can do:*\n`;
+  welcome += `📡 Live trade signals\n`;
+  welcome += `📊 Market updates\n`;
+  welcome += `💰 Account info\n`;
+  welcome += `💻 Terminal access\n\n`;
+  welcome += `Use the menu below to get started\\!`;
+
+  bot.sendMessage(msg.chat.id, welcome, { parse_mode: 'MarkdownV2', ...mainMenu });
+});
+
+bot.onText(/\/signals/, async (msg) => {
+  const user = await getUserByTelegramId(msg.from.id);
+  if (!user || user.plan === 'free') {
+    return bot.sendMessage(msg.chat.id,
+      '🔒 *Signals are locked*\n\nUpgrade to Pro or Elite to receive live signals\\.\n\n[Upgrade Now](' + FRONTEND_URL + '/alphaedge-checkout.html)',
+      { parse_mode: 'MarkdownV2' }
+    );
+  }
+  bot.sendMessage(msg.chat.id, '📡 *Choose a market:*', { parse_mode: 'MarkdownV2', ...signalsMenu });
+});
+
+bot.onText(/\/markets/, (msg) => {
+  const text = `📊 *Market Overview*\n\n` +
+    `📈 *S&P 500:* 5,421 \\+0\\.84%\n` +
+    `💱 *EUR\\/USD:* 1\\.0842 \\-0\\.14%\n` +
+    `₿ *BTC:* $67,420 \\+3\\.6%\n` +
+    `Ξ *ETH:* $3,812 \\+2\\.1%\n` +
+    `◈ *SOL:* $168\\.40 \\+4\\.2%\n\n` +
+    `[Open Terminal](${FRONTEND_URL}/alphaedge-trading-terminal.html)`;
+  bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
+});
+
+bot.onText(/\/connect/, async (msg) => {
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  try {
+    await prisma.telegramCode.upsert({
+      where: { telegramId: String(msg.from.id) },
+      update: { code, expiresAt: new Date(Date.now() + 10 * 60 * 1000) },
+      create: { telegramId: String(msg.from.id), code, expiresAt: new Date(Date.now() + 10 * 60 * 1000) }
+    });
+  } catch(e) {
+    // Table may not exist yet — just show the code
+  }
+  const text = `🔗 *Connect Your AlphaEdge Account*\n\n` +
+    `Your connection code:\n\n` +
+    `\`${code}\`\n\n` +
+    `_Expires in 10 minutes_\n\n` +
+    `Enter this code in your [Dashboard](${FRONTEND_URL}/alphaedge-dashboard.html) under Account settings\\.`;
+  bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
+});
+
+bot.onText(/\/account/, async (msg) => {
+  const user = await getUserByTelegramId(msg.from.id);
+  if (!user) {
+    return bot.sendMessage(msg.chat.id,
+      '❌ *No account connected*\n\nUse /connect to link your AlphaEdge account\\.',
+      { parse_mode: 'MarkdownV2' }
+    );
+  }
+  const text = `👤 *Your Account*\n\n` +
+    `Name: ${escapeMarkdown(user.firstName + ' ' + user.lastName)}\n` +
+    `Email: ${escapeMarkdown(user.email)}\n` +
+    `Plan: *${escapeMarkdown(user.plan?.toUpperCase() || 'FREE')}*\n\n` +
+    `[Open Dashboard](${FRONTEND_URL}/alphaedge-dashboard.html)`;
+  bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
+});
+
+bot.onText(/\/upgrade/, (msg) => {
+  const text = `⚡ *Upgrade AlphaEdge*\n\n` +
+    `🆓 *Free* — 2 signals/day\n` +
+    `🔵 *Pro* — $49/mo — All markets, unlimited signals\n` +
+    `👑 *Elite* — $149/mo — Priority signals \\+ scanner\n\n` +
+    `[Choose Your Plan](${FRONTEND_URL}/alphaedge-checkout.html)`;
+  bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
+});
+
+bot.onText(/\/help/, (msg) => {
+  const text = `❓ *AlphaEdge Bot Commands*\n\n` +
+    `/start — Welcome & overview\n` +
+    `/signals — Live trade signals\n` +
+    `/markets — Market prices\n` +
+    `/connect — Link your account\n` +
+    `/account — Your account info\n` +
+    `/upgrade — View plans\n` +
+    `/help — This message\n\n` +
+    `[Visit AlphaEdge](${FRONTEND_URL})`;
+  bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
+});
+
+// ─────────────────────────────────────────────
+// TEXT MESSAGE HANDLERS
+// ─────────────────────────────────────────────
+bot.on('message', async (msg) => {
+  if (msg.text?.startsWith('/')) return;
+  const text = msg.text?.toLowerCase();
+  if (!text) return;
+
+  if (text.includes('signal')) {
+    bot.emit('text', { ...msg, text: '/signals' });
+  } else if (text.includes('market')) {
+    bot.emit('text', { ...msg, text: '/markets' });
+  } else if (text.includes('account') || text.includes('💰')) {
+    bot.emit('text', { ...msg, text: '/account' });
+  } else if (text.includes('connect') || text.includes('🔗')) {
+    bot.emit('text', { ...msg, text: '/connect' });
+  } else if (text.includes('terminal') || text.includes('💻')) {
+    bot.sendMessage(msg.chat.id, `💻 Open the AlphaEdge Terminal:\n${FRONTEND_URL}/alphaedge-trading-terminal.html`);
+  } else if (text.includes('help') || text.includes('❓')) {
+    bot.emit('text', { ...msg, text: '/help' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// CALLBACK QUERY HANDLER
+// ─────────────────────────────────────────────
+bot.on('callback_query', async (query) => {
+  const data = query.data;
+  const chatId = query.message.chat.id;
+  bot.answerCallbackQuery(query.id);
+
+  if (data.startsWith('sig_')) {
+    const market = data.replace('sig_', '');
+    const user = await getUserByTelegramId(query.from.id);
+    if (!user || user.plan === 'free') {
+      return bot.sendMessage(chatId,
+        '🔒 Upgrade to Pro to see signals: ' + FRONTEND_URL + '/alphaedge-checkout.html'
+      );
+    }
+    bot.sendMessage(chatId, formatSignals(market), { parse_mode: 'MarkdownV2' });
+  } else if (data === 'main_menu') {
+    bot.sendMessage(chatId, '🏠 Main Menu', mainMenu);
+  }
+});
 
 console.log('[BOT] AlphaEdgeProBot starting...');
 
-// ─────────────────────────────────────────────
-// HELPER: get user from DB by telegram ID
-// ─────────────────────────────────────────────
-async function getUserByTelegramId(telegramId) {
-  return prisma.user.findFirst({
-    where: { telegramUserId: telegramId.toString() }
-  });
-}
-
-// ─────────────────────────────────────────────
-// /start — Welcome message + connect account
-// ─────────────────────────────────────────────
-bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  const firstName = msg.from.first_name || 'Trader';
-
-  const existingUser = await getUserByTelegramId(chatId);
-
-  if (existingUser) {
-    bot.sendMessage(chatId, 
-      `👋 Welcome back, *${existingUser.firstName}*!\n\n` +
-      `Your account is connected ✅\n` +
-      `Plan: *${existingUser.plan.toUpperCase()}*\n\n` +
-      `Use /signals to see latest signals\n` +
-      `Use /help to see all commands`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-
-  bot.sendMessage(chatId,
-    `🚀 *Welcome to AlphaEdge, ${firstName}!*\n\n` +
-    `I'm your personal trading assistant. I'll deliver:\n` +
-    `📡 Real-time trade signals\n` +
-    `🔔 Account notifications\n` +
-    `📊 Market updates\n\n` +
-    `*To get started, connect your AlphaEdge account:*\n` +
-    `1. Go to your dashboard\n` +
-    `2. Click "Connect Telegram"\n` +
-    `3. Enter your connection code\n\n` +
-    `Or type /connect to get your connection code here.\n\n` +
-    `Don't have an account? Sign up free at:\n${FRONTEND_URL}`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// ─────────────────────────────────────────────
-// /connect — Generate connection code
-// ─────────────────────────────────────────────
-bot.onText(/\/connect/, async (msg) => {
-  const chatId = msg.chat.id;
-  const telegramUsername = msg.from.username || '';
-
-  const existing = await getUserByTelegramId(chatId);
-  if (existing) {
-    bot.sendMessage(chatId,
-      `✅ Your Telegram is already connected to *${existing.firstName} ${existing.lastName}*'s account.\n\nUse /help to see available commands.`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-
-  // Generate 6-digit code
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expires = new Date(Date.now() + 10 * 60 * 1000);
-
-  // Store code temporarily in DB
-  await prisma.user.updateMany({
-    where: { telegramUserId: chatId.toString() },
-    data: { telegramUserId: null }
-  });
-
-  // Store pending connection
-  global.pendingConnections = global.pendingConnections || new Map();
-  global.pendingConnections.set(code, {
-    telegramId: chatId.toString(),
-    username: telegramUsername,
-    expires
-  });
-
-  bot.sendMessage(chatId,
-    `🔗 *Your connection code:*\n\n` +
-    `\`${code}\`\n\n` +
-    `1. Go to your AlphaEdge dashboard\n` +
-    `2. Click your profile → "Connect Telegram"\n` +
-    `3. Enter this code\n\n` +
-    `⏱ This code expires in *10 minutes*.`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// ─────────────────────────────────────────────
-// /signals — Show latest signals
-// ─────────────────────────────────────────────
-bot.onText(/\/signals/, async (msg) => {
-  const chatId = msg.chat.id;
-  const user = await getUserByTelegramId(chatId);
-
-  if (!user) {
-    bot.sendMessage(chatId,
-      `🔒 You need to connect your AlphaEdge account first.\n\nType /connect to get started.`
-    );
-    return;
-  }
-
-  if (user.plan === 'free') {
-    bot.sendMessage(chatId,
-      `🔒 *Live signals are available on Pro and Elite plans.*\n\n` +
-      `Upgrade at: ${FRONTEND_URL}/alphaedge-checkout.html`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-
-  const signals = [
-    { ticker: 'AAPL', action: 'BUY', entry: '$189.40', target: '$197.00', stop: '$185.00', time: '2m ago' },
-    { ticker: 'NVDA', action: 'BUY', entry: '$875.20', target: '$920.00', stop: '$850.00', time: '8m ago' },
-    { ticker: 'BTC', action: 'BUY', entry: '$67,420', target: '$71,000', stop: '$65,000', time: '12m ago' },
-    { ticker: 'EUR/USD', action: 'SELL', entry: '1.0842', target: '1.0780', stop: '1.0890', time: '18m ago' },
-    { ticker: 'ETH', action: 'BUY', entry: '$3,512', target: '$3,750', stop: '$3,380', time: '25m ago' },
-  ];
-
-  let message = `📡 *Latest AlphaEdge Signals*\n\n`;
-  signals.forEach(s => {
-    const emoji = s.action === 'BUY' ? '🟢' : '🔴';
-    message += `${emoji} *${s.ticker}* — ${s.action}\n`;
-    message += `   Entry: ${s.entry} | TP: ${s.target} | SL: ${s.stop}\n`;
-    message += `   ⏱ ${s.time}\n\n`;
-  });
-  message += `View all signals: ${FRONTEND_URL}/alphaedge-dashboard.html`;
-
-  bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-});
-
-// ─────────────────────────────────────────────
-// /account — Show account info
-// ─────────────────────────────────────────────
-bot.onText(/\/account/, async (msg) => {
-  const chatId = msg.chat.id;
-  const user = await getUserByTelegramId(chatId);
-
-  if (!user) {
-    bot.sendMessage(chatId, `🔒 Connect your account first. Type /connect`);
-    return;
-  }
-
-  bot.sendMessage(chatId,
-    `👤 *Your AlphaEdge Account*\n\n` +
-    `Name: ${user.firstName} ${user.lastName}\n` +
-    `Email: ${user.email}\n` +
-    `Plan: *${user.plan.toUpperCase()}*\n` +
-    `Member since: ${new Date(user.createdAt).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}\n\n` +
-    `Manage your account: ${FRONTEND_URL}/alphaedge-dashboard.html`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// ─────────────────────────────────────────────
-// /markets — Quick market snapshot
-// ─────────────────────────────────────────────
-bot.onText(/\/markets/, async (msg) => {
-  const chatId = msg.chat.id;
-
-  bot.sendMessage(chatId,
-    `📊 *Market Snapshot*\n\n` +
-    `🇺🇸 S&P 500: *5,421* (+0.84%)\n` +
-    `💻 NASDAQ: *17,832* (+1.12%)\n` +
-    `₿ BTC/USD: *$67,420* (+2.3%)\n` +
-    `Ξ ETH/USD: *$3,512* (+1.8%)\n` +
-    `💱 EUR/USD: *1.0842* (-0.14%)\n` +
-    `🥇 Gold: *$2,318* (-0.4%)\n\n` +
-    `_Prices delayed 15 min_\n\n` +
-    `View live dashboard: ${FRONTEND_URL}/alphaedge-dashboard.html`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// ─────────────────────────────────────────────
-// /upgrade — Upgrade plan
-// ─────────────────────────────────────────────
-bot.onText(/\/upgrade/, async (msg) => {
-  const chatId = msg.chat.id;
-
-  bot.sendMessage(chatId,
-    `⚡ *Upgrade Your AlphaEdge Plan*\n\n` +
-    `🆓 *Free* — 3 signals/day, 2 courses\n` +
-    `💎 *Pro — $49/mo* — All signals, 20+ courses, Telegram alerts\n` +
-    `👑 *Elite — $149/mo* — Everything + 1-on-1 sessions, scanner\n\n` +
-    `Start your 7-day free trial:\n${FRONTEND_URL}/alphaedge-checkout.html`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// ─────────────────────────────────────────────
-// /help — Show all commands
-// ─────────────────────────────────────────────
-bot.onText(/\/help/, (msg) => {
-  const chatId = msg.chat.id;
-
-  bot.sendMessage(chatId,
-    `🤖 *AlphaEdge Bot Commands*\n\n` +
-    `/start — Welcome & account status\n` +
-    `/connect — Connect your AlphaEdge account\n` +
-    `/signals — View latest trade signals\n` +
-    `/markets — Quick market snapshot\n` +
-    `/account — View your account info\n` +
-    `/upgrade — View plan options\n` +
-    `/help — Show this menu\n\n` +
-    `📱 Dashboard: ${FRONTEND_URL}/alphaedge-dashboard.html\n` +
-    `💬 Support: support@alphaedgetrading.site`,
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// ─────────────────────────────────────────────
-// BROADCAST SIGNAL (called internally)
-// ─────────────────────────────────────────────
-async function broadcastSignal(signal) {
-  try {
-    const users = await prisma.user.findMany({
-      where: {
-        telegramUserId: { not: null },
-        plan: { in: ['pro', 'elite'] },
-        status: 'active'
-      }
-    });
-
-    const emoji = signal.action === 'BUY' ? '🟢' : '🔴';
-    const message =
-      `📡 *NEW SIGNAL — AlphaEdge*\n\n` +
-      `${emoji} *${signal.ticker}* — ${signal.action}\n\n` +
-      `Entry: \`${signal.entry}\`\n` +
-      `Target: \`${signal.target}\`\n` +
-      `Stop Loss: \`${signal.stop}\`\n\n` +
-      `Market: ${signal.market}\n` +
-      `Setup: ${signal.setup}\n\n` +
-      `_Not financial advice. Always manage your risk._`;
-
-    let sent = 0;
-    for (const user of users) {
-      try {
-        await bot.sendMessage(user.telegramUserId, message, { parse_mode: 'Markdown' });
-        sent++;
-      } catch (err) {
-        console.error(`[BOT] Failed to send to ${user.telegramUserId}:`, err.message);
-      }
-    }
-    console.log(`[BOT] Signal broadcast to ${sent}/${users.length} users`);
-  } catch (err) {
-    console.error('[BOT] Broadcast error:', err.message);
-  }
-}
-
-// ─────────────────────────────────────────────
-// Handle unknown commands
-// ─────────────────────────────────────────────
-bot.on('message', (msg) => {
-  const chatId = msg.chat.id;
-  if (msg.text && !msg.text.startsWith('/')) {
-    bot.sendMessage(chatId,
-      `I only respond to commands. Type /help to see what I can do! 👋`
-    );
-  }
-});
-
-bot.on('polling_error', (err) => {
-  console.error('[BOT] Polling error:', err.message);
-});
-
-console.log('[BOT] AlphaEdgeProBot is running!');
-
-module.exports = { bot, broadcastSignal };
+module.exports = bot;
