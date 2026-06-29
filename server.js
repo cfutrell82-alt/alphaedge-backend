@@ -1,47 +1,27 @@
-/**
- * AlphaEdge — Main Server Entry Point
- */
-
+require('dotenv').config();
 const { spawn } = require('child_process');
+const path = require('path');
 
-const mainPort = process.env.PORT || '3000';
-const stripePort = String(parseInt(mainPort) + 1);
-const paymentsPort = String(parseInt(mainPort) + 2);
+console.log('Starting AlphaEdge backend...');
 
-console.log(`Starting AlphaEdge backend...`);
-console.log(`Auth server → port ${mainPort}`);
-console.log(`Stripe server → port ${stripePort}`);
-console.log(`Payments server → port ${paymentsPort}`);
-
-// Auth server
-const auth = spawn('node', ['alphaedge-auth.js'], {
-  stdio: 'inherit',
-  env: { ...process.env, PORT: mainPort }
+// Start auth server (includes webhook endpoint for Telegram)
+const auth = spawn('node', [path.join(__dirname, 'alphaedge-auth.js')], {
+  stdio: 'inherit', env: { ...process.env, PORT: 3000 }
 });
-auth.on('close', code => console.log(`Auth server exited with code ${code}`));
+auth.on('exit', (code) => console.log(`Auth server exited: ${code}`));
+console.log('Auth server → port 3000');
 
-// Stripe server
-const stripe = spawn('node', ['alphaedge-stripe-server.js'], {
-  stdio: 'inherit',
-  env: { ...process.env, PORT: stripePort }
+// Start stripe server
+const stripe = spawn('node', [path.join(__dirname, 'alphaedge-stripe-server.js')], {
+  stdio: 'inherit', env: { ...process.env, PORT: 3001 }
 });
-stripe.on('close', code => console.log(`Stripe server exited with code ${code}`));
+stripe.on('exit', (code) => console.log(`Stripe server exited: ${code}`));
+console.log('Stripe server → port 3001');
 
-// NOWPayments server
-const payments = spawn('node', ['alphaedge-payments.js'], {
-  stdio: 'inherit',
-  env: { ...process.env, PAYMENTS_PORT: paymentsPort }
-});
-payments.on('close', code => console.log(`Payments server exited with code ${code}`));
-
-// Telegram bot
-if (process.env.TELEGRAM_BOT_TOKEN) {
-  const bot = spawn('node', ['alphaedge-telegram-bot.js'], {
-    stdio: 'inherit',
-    env: { ...process.env }
-  });
-  bot.on('close', code => console.log(`Telegram bot exited with code ${code}`));
-  console.log(`Telegram bot → AlphaEdgeProBot starting...`);
-} else {
-  console.log(`Telegram bot skipped — TELEGRAM_BOT_TOKEN not set`);
+// Initialize bot in webhook mode (no polling, no conflicts)
+try {
+  require('./alphaedge-telegram-bot');
+  console.log('Telegram bot → webhook mode');
+} catch(err) {
+  console.error('Bot init error:', err.message);
 }
