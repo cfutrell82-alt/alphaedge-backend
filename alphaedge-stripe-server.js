@@ -1,168 +1,131 @@
 /**
- * AlphaEdge — Stripe Subscription Backend
- * ────────────────────────────────────────
- * Stack: Node.js + Express + Stripe Node SDK
+ * ─────────────────────────────────────────────────────────────
+ * alphaedge-stripe-server.js — LIVE KEYS VERSION
+ * ─────────────────────────────────────────────────────────────
  *
- * Install:
- *   npm install express stripe cors dotenv
+ * .env variables needed:
+ *   STRIPE_SECRET_KEY=sk_live_...          (Dashboard → Developers → API keys)
+ *   STRIPE_WEBHOOK_SECRET=whsec_...        (Dashboard → Developers → Webhooks → signing secret)
+ *   STRIPE_PRICE_PRO=price_live_...        (Dashboard → Products → Pro plan price ID)
+ *   STRIPE_PRICE_ELITE=price_live_...      (Dashboard → Products → Elite plan price ID)
+ *   SIGNAL_SECRET=...                      (same value as in alphaedge-signals.js)
+ *   CLIENT_URL=https://alphaedgetrading.site
+ *   AUTH_API_URL=http://localhost:3000     (internal URL for alphaedge-auth.js)
+ *   SIGNALS_API_URL=http://localhost:3002  (internal URL for alphaedge-signals.js)
  *
- * .env file:
- *   STRIPE_SECRET_KEY=sk_live_...
- *   STRIPE_WEBHOOK_SECRET=whsec_...
- *   CLIENT_URL=https://yoursite.com
+ * Stripe Dashboard setup:
+ *   1. Create two Products: "AlphaEdge Pro" ($49/mo) and "AlphaEdge Elite" ($149/mo)
+ *   2. Set Billing → Payment methods → Cards ON, disable test mode
+ *   3. Webhooks → Add endpoint:
+ *        URL: https://alphaedge-backend-uu13.onrender.com/stripe/webhook
+ *        Events to listen for (select all of these):
+ *          checkout.session.completed
+ *          customer.subscription.created
+ *          customer.subscription.updated
+ *          customer.subscription.deleted
+ *          invoice.payment_succeeded
+ *          invoice.payment_failed
+ * ─────────────────────────────────────────────────────────────
  */
 
 require('dotenv').config();
 const express = require('express');
-const cors    = require('cors');
-const stripe  = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const Stripe  = require('stripe');
+const axios   = require('axios');
 
-const app = express();
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+const app    = express();
 
-// ─── MIDDLEWARE ───────────────────────────────────────────────
-// Raw body needed for webhook signature verification
-app.use('/api/webhook', express.raw({ type: 'application/json' }));
+const FRONTEND_URL   = process.env.CLIENT_URL        || 'https://alphaedgetrading.site';
+const AUTH_API       = process.env.AUTH_API_URL      || 'http://localhost:3000';
+const SIGNALS_API    = process.env.SIGNALS_API_URL   || 'http://localhost:3002';
+const SIGNAL_SECRET  = process.env.SIGNAL_SECRET;
+
+// ── Raw body needed for Stripe webhook signature verification ──
+app.use('/stripe/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
-app.use(cors({ origin: process.env.CLIENT_URL }));
 
+// ─────────────────────────────────────────────
+// PRICE ID → PLAN NAME MAP
+// ─────────────────────────────────────────────
+function planFromPriceId(priceId) {
+  const map = {
+    [process.env.STRIPE_PRICE_PRO]:   'pro',
+    [process.env.STRIPE_PRICE_ELITE]: 'elite',
+  };
+  return map[priceId] || 'free';
+}
 
-// ─── PRICE IDs ────────────────────────────────────────────────
-// Create these in your Stripe Dashboard → Products
-// Paste the price IDs here
-const PRICES = {
-  pro_monthly:   'price_YOUR_PRO_MONTHLY_ID',
-  pro_annual:    'price_YOUR_PRO_ANNUAL_ID',
-  elite_monthly: 'price_YOUR_ELITE_MONTHLY_ID',
-  elite_annual:  'price_YOUR_ELITE_ANNUAL_ID',
-};
+// ─────────────────────────────────────────────
+// CREATE CHECKOUT SESSION
+// ─────────────────────────────────────────────
+app.post('/stripe/checkout', async (req, res) => {
+  const { plan, userId, userEmail, telegramUserId } = req.body;
 
-
-// ─── CREATE SUBSCRIPTION ──────────────────────────────────────
-// Called by the checkout page after user fills in the form.
-// Returns a clientSecret so Stripe.js can collect the card securely.
-app.post('/api/create-subscription', async (req, res) => {
-  const { email, name, priceId, trial } = req.body;
-
-  try {
-    // 1. Create or retrieve Stripe Customer
-    let customer;
-    const existing = await stripe.customers.list({ email, limit: 1 });
-
-    if (existing.data.length > 0) {
-      customer = existing.data[0];
-    } else {
-      customer = await stripe.customers.create({ email, name });
-    }
-
-    // 2. Create subscription
-    //    For trial plans (Pro monthly), add trial_period_days
-    const subscriptionParams = {
-      customer: customer.id,
-      items: [{ price: priceId }],
-      payment_behavior: 'default_incomplete',
-      payment_settings: { save_default_payment_method: 'on_subscription' },
-      expand: ['latest_invoice.payment_intent', 'pending_setup_intent'],
-    };
-
-    if (trial) {
-      subscriptionParams.trial_period_days = 7;
-    }
-
-    const subscription = await stripe.subscriptions.create(subscriptionParams);
-
-    // 3. Return the appropriate client secret
-    //    - Trial subscriptions use SetupIntent (no charge yet)
-    //    - Paid subscriptions use PaymentIntent
-    if (trial && subscription.pending_setup_intent) {
-      res.json({ clientSecret: subscription.pending_setup_intent.client_secret });
-    } else {
-      res.json({
-        clientSecret: subscription.latest_invoice.payment_intent.client_secret,
-      });
-    }
-
-  } catch (err) {
-    console.error('Stripe error:', err.message);
-    res.status(400).json({ error: err.message });
+  if (!plan || !userId) {
+    return res.status(400).json({ error: 'plan and userId are required.' });
   }
-});
 
+  const priceId = plan === 'elite'
+    ? process.env.STRIPE_PRICE_ELITE
+    : process.env.STRIPE_PRICE_PRO;
 
-// ─── CANCEL SUBSCRIPTION ──────────────────────────────────────
-// Call this from your member dashboard "Cancel plan" button
-app.post('/api/cancel-subscription', async (req, res) => {
-  const { subscriptionId } = req.body;
+  if (!priceId) {
+    return res.status(500).json({ error: `No price ID configured for plan: ${plan}` });
+  }
 
   try {
-    // Cancel at period end (subscriber keeps access until billing date)
-    const subscription = await stripe.subscriptions.update(subscriptionId, {
-      cancel_at_period_end: true,
+    const session = await stripe.checkout.sessions.create({
+      mode:               'subscription',
+      payment_method_types: ['card'],
+      customer_email:     userEmail,
+      line_items: [{ price: priceId, quantity: 1 }],
+      metadata: {
+        userId,                            // AlphaEdge DB user ID
+        plan,
+        telegramUserId: telegramUserId || '', // for Telegram channel invite
+      },
+      subscription_data: {
+        metadata: { userId, plan, telegramUserId: telegramUserId || '' },
+      },
+      success_url: `${FRONTEND_URL}/alphaedge-dashboard.html?sub=success&plan=${plan}`,
+      cancel_url:  `${FRONTEND_URL}/alphaedge-checkout.html?sub=cancelled`,
     });
 
-    res.json({ status: subscription.status, cancelAt: subscription.cancel_at });
+    console.log(`[CHECKOUT] Session created: ${session.id} | ${userEmail} | ${plan}`);
+    res.json({ url: session.url });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('[CHECKOUT ERROR]', err.message);
+    res.status(500).json({ error: 'Could not create checkout session.' });
   }
 });
 
-
-// ─── CHANGE PLAN ──────────────────────────────────────────────
-// Upgrade Pro → Elite or switch monthly ↔ annual
-app.post('/api/change-plan', async (req, res) => {
-  const { subscriptionId, newPriceId } = req.body;
-
-  try {
-    const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-    const currentItemId = subscription.items.data[0].id;
-
-    const updated = await stripe.subscriptions.update(subscriptionId, {
-      items: [{ id: currentItemId, price: newPriceId }],
-      proration_behavior: 'create_prorations', // Charges/credits difference immediately
-    });
-
-    res.json({ status: updated.status, plan: updated.items.data[0].price.id });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-
-// ─── CUSTOMER PORTAL SESSION ──────────────────────────────────
-// Opens Stripe's hosted portal for billing management
-// (update card, download invoices, cancel — all handled by Stripe)
-app.post('/api/customer-portal', async (req, res) => {
-  const { customerId } = req.body;
+// ─────────────────────────────────────────────
+// CUSTOMER PORTAL (manage/cancel subscription)
+// ─────────────────────────────────────────────
+app.post('/stripe/portal', async (req, res) => {
+  const { stripeCustomerId } = req.body;
+  if (!stripeCustomerId) return res.status(400).json({ error: 'stripeCustomerId required.' });
 
   try {
     const session = await stripe.billingPortal.sessions.create({
-      customer: customerId,
-      return_url: `${process.env.CLIENT_URL}/dashboard`,
+      customer:   stripeCustomerId,
+      return_url: `${FRONTEND_URL}/alphaedge-dashboard.html`,
     });
-
     res.json({ url: session.url });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('[PORTAL ERROR]', err.message);
+    res.status(500).json({ error: 'Could not open billing portal.' });
   }
 });
 
-
-// ─── WEBHOOK HANDLER ──────────────────────────────────────────
-// Stripe sends events here. Use these to update your database,
-// grant/revoke access, send welcome emails, etc.
-//
-// Setup in Stripe Dashboard → Developers → Webhooks
-// Events to listen for (minimum):
-//   customer.subscription.created
-//   customer.subscription.updated
-//   customer.subscription.deleted
-//   invoice.payment_succeeded
-//   invoice.payment_failed
-//   customer.subscription.trial_will_end
-
-app.post('/api/webhook', async (req, res) => {
+// ─────────────────────────────────────────────
+// STRIPE WEBHOOK — the core event handler
+// ─────────────────────────────────────────────
+app.post('/stripe/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
-  let event;
 
+  let event;
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
@@ -170,149 +133,198 @@ app.post('/api/webhook', async (req, res) => {
       process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
-    console.error('Webhook signature error:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    console.error('[WEBHOOK] Signature verification failed:', err.message);
+    return res.status(400).json({ error: `Webhook error: ${err.message}` });
   }
 
-  // Handle events
-  switch (event.type) {
+  console.log(`[WEBHOOK] Event: ${event.type}`);
 
-    case 'customer.subscription.created':
-    case 'customer.subscription.updated': {
-      const sub = event.data.object;
-      const plan = getPlanFromPriceId(sub.items.data[0].price.id);
+  try {
+    switch (event.type) {
 
-      // TODO: update your database
-      // db.users.update({ stripeCustomerId: sub.customer }, {
-      //   subscriptionId: sub.id,
-      //   plan,
-      //   status: sub.status,   // 'active', 'trialing', 'past_due', 'canceled'
-      //   currentPeriodEnd: new Date(sub.current_period_end * 1000),
-      //   cancelAtPeriodEnd: sub.cancel_at_period_end,
-      // });
+      // ── Checkout completed → activate subscription ──────────
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        if (session.mode !== 'subscription') break;
 
-      console.log(`Subscription ${sub.status} for customer ${sub.customer} — plan: ${plan}`);
-      break;
+        const { userId, plan, telegramUserId } = session.metadata;
+        const stripeCustomerId = session.customer;
+        const subscriptionId   = session.subscription;
+
+        // 1. Update plan in our DB
+        await updateUserPlan(userId, plan, stripeCustomerId, subscriptionId);
+
+        // 2. Grant Telegram channel access
+        if (telegramUserId) {
+          await grantTelegramAccess(telegramUserId, plan);
+        }
+
+        console.log(`[WEBHOOK] Subscription activated: user=${userId} plan=${plan}`);
+        break;
+      }
+
+      // ── Subscription updated (plan change / renewal) ─────────
+      case 'customer.subscription.updated': {
+        const sub    = event.data.object;
+        const userId = sub.metadata?.userId;
+        if (!userId) break;
+
+        const priceId = sub.items.data[0]?.price?.id;
+        const plan    = planFromPriceId(priceId);
+        const status  = sub.status; // active, past_due, canceled, etc.
+
+        if (status === 'active') {
+          await updateUserPlan(userId, plan, sub.customer, sub.id);
+          console.log(`[WEBHOOK] Subscription updated: user=${userId} plan=${plan}`);
+        } else if (status === 'past_due') {
+          console.warn(`[WEBHOOK] Payment past due: user=${userId}`);
+          // Optionally: send payment reminder email here
+        }
+        break;
+      }
+
+      // ── Subscription cancelled → downgrade to free ───────────
+      case 'customer.subscription.deleted': {
+        const sub              = event.data.object;
+        const userId           = sub.metadata?.userId;
+        const telegramUserId   = sub.metadata?.telegramUserId;
+        const priceId          = sub.items.data[0]?.price?.id;
+        const plan             = planFromPriceId(priceId);
+
+        if (userId) {
+          await updateUserPlan(userId, 'free', sub.customer, null);
+          console.log(`[WEBHOOK] Subscription cancelled: user=${userId} → downgraded to free`);
+        }
+
+        // Revoke Telegram access
+        if (telegramUserId && plan !== 'free') {
+          await revokeTelegramAccess(telegramUserId, plan);
+        }
+        break;
+      }
+
+      // ── Invoice paid → log renewal ───────────────────────────
+      case 'invoice.payment_succeeded': {
+        const invoice = event.data.object;
+        if (invoice.billing_reason === 'subscription_cycle') {
+          console.log(`[WEBHOOK] Subscription renewed: customer=${invoice.customer} amount=$${(invoice.amount_paid / 100).toFixed(2)}`);
+          // Optionally: send renewal confirmation email
+        }
+        break;
+      }
+
+      // ── Invoice failed → warn user ────────────────────────────
+      case 'invoice.payment_failed': {
+        const invoice = event.data.object;
+        console.error(`[WEBHOOK] Payment FAILED: customer=${invoice.customer} attempt=${invoice.attempt_count}`);
+        // Optionally: trigger a "payment failed" email to the user
+        break;
+      }
+
+      default:
+        // Silently ignore unhandled event types
+        break;
     }
-
-    case 'customer.subscription.deleted': {
-      const sub = event.data.object;
-
-      // TODO: revoke access in your database
-      // db.users.update({ stripeCustomerId: sub.customer }, {
-      //   plan: 'free',
-      //   status: 'canceled',
-      //   subscriptionId: null,
-      // });
-
-      console.log(`Subscription canceled for customer ${sub.customer}`);
-      break;
-    }
-
-    case 'invoice.payment_succeeded': {
-      const invoice = event.data.object;
-
-      // TODO: send receipt email, log payment
-      // emailService.sendReceipt(invoice.customer_email, invoice.hosted_invoice_url);
-
-      console.log(`Payment succeeded: $${invoice.amount_paid / 100} from ${invoice.customer_email}`);
-      break;
-    }
-
-    case 'invoice.payment_failed': {
-      const invoice = event.data.object;
-
-      // TODO: send payment failure email, flag account
-      // emailService.sendPaymentFailed(invoice.customer_email, invoice.hosted_invoice_url);
-
-      console.warn(`Payment failed for ${invoice.customer_email}`);
-      break;
-    }
-
-    case 'customer.subscription.trial_will_end': {
-      const sub = event.data.object;
-      const trialEndDate = new Date(sub.trial_end * 1000);
-
-      // TODO: send "trial ending in 3 days" email
-      // emailService.sendTrialEnding(sub.customer, trialEndDate);
-
-      console.log(`Trial ending ${trialEndDate.toDateString()} for customer ${sub.customer}`);
-      break;
-    }
-
-    default:
-      console.log(`Unhandled event type: ${event.type}`);
+  } catch (err) {
+    console.error(`[WEBHOOK] Handler error for ${event.type}:`, err.message);
+    // Still return 200 to prevent Stripe from retrying a broken handler
   }
 
-  res.json({ received: true });
+  res.status(200).json({ received: true });
 });
 
+// ─────────────────────────────────────────────
+// INTERNAL HELPERS
+// ─────────────────────────────────────────────
 
-// ─── HELPERS ──────────────────────────────────────────────────
-function getPlanFromPriceId(priceId) {
-  const map = {
-    [PRICES.pro_monthly]:   'pro',
-    [PRICES.pro_annual]:    'pro',
-    [PRICES.elite_monthly]: 'elite',
-    [PRICES.elite_annual]:  'elite',
-  };
-  return map[priceId] || 'free';
+async function updateUserPlan(userId, plan, stripeCustomerId, subscriptionId) {
+  try {
+    await axios.post(`${AUTH_API}/api/user/update-plan`, {
+      userId,
+      plan,
+      stripeCustomerId,
+      subscriptionId,
+    });
+  } catch (err) {
+    console.error(`[STRIPE] updateUserPlan failed for user ${userId}:`, err.message);
+  }
 }
 
+async function grantTelegramAccess(telegramUserId, plan) {
+  try {
+    await axios.post(`${SIGNALS_API}/api/grant-access`, {
+      telegramUserId,
+      plan,
+      secret: SIGNAL_SECRET,
+    });
+  } catch (err) {
+    console.error(`[STRIPE] grantTelegramAccess failed:`, err.message);
+  }
+}
 
-// ─── START ────────────────────────────────────────────────────
+async function revokeTelegramAccess(telegramUserId, plan) {
+  try {
+    await axios.post(`${SIGNALS_API}/api/revoke-access`, {
+      telegramUserId,
+      plan,
+      secret: SIGNAL_SECRET,
+    });
+  } catch (err) {
+    console.error(`[STRIPE] revokeTelegramAccess failed:`, err.message);
+  }
+}
+
+// ─────────────────────────────────────────────
+// HEALTH CHECK
+// ─────────────────────────────────────────────
+app.get('/health', (req, res) => {
+  res.json({
+    status:    'ok',
+    service:   'alphaedge-stripe',
+    liveMode:  process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ?? false,
+    uptime:    process.uptime(),
+  });
+});
+
+// ─────────────────────────────────────────────
+// START
+// ─────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`AlphaEdge API running on port ${PORT}`));
-
+app.listen(PORT, () => {
+  const mode = process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? '🟢 LIVE' : '🟡 TEST';
+  console.log(`[STRIPE] Server running on port ${PORT} — ${mode} mode`);
+});
 
 /**
- * ════════════════════════════════════════════════
- * SETUP CHECKLIST
- * ════════════════════════════════════════════════
+ * ─────────────────────────────────────────────────────────────
+ * ALSO UPDATE alphaedge-auth.js — /api/user/update-plan
+ * ─────────────────────────────────────────────────────────────
  *
- * 1. STRIPE DASHBOARD SETUP
- *    ├── Create product "AlphaEdge Pro"
- *    │     - Monthly price: $49/mo  → copy price ID → PRICES.pro_monthly
- *    │     - Annual price:  $470/yr → copy price ID → PRICES.pro_annual
- *    ├── Create product "AlphaEdge Elite"
- *    │     - Monthly price: $149/mo → copy price ID → PRICES.elite_monthly
- *    │     - Annual price:  $1,430/yr → copy price ID → PRICES.elite_annual
- *    └── Enable Customer Portal (Billing → Customer portal → Activate)
+ * The existing route only updates `plan`. Add stripeCustomerId
+ * and subscriptionId so you can open the billing portal later:
  *
- * 2. ENVIRONMENT VARIABLES
- *    STRIPE_SECRET_KEY=sk_live_...        (from Stripe Dashboard → API Keys)
- *    STRIPE_WEBHOOK_SECRET=whsec_...      (from Dashboard → Webhooks → signing secret)
- *    CLIENT_URL=https://alphaedge.com
+ * app.post('/api/user/update-plan', async (req, res) => {
+ *   const { userId, plan, stripeCustomerId, subscriptionId } = req.body;
+ *   if (!userId || !plan) return res.status(400).json({ error: 'userId and plan are required.' });
  *
- * 3. WEBHOOK ENDPOINT
- *    Register: https://yourapi.com/api/webhook
- *    Events:
- *      ✓ customer.subscription.created
- *      ✓ customer.subscription.updated
- *      ✓ customer.subscription.deleted
- *      ✓ invoice.payment_succeeded
- *      ✓ invoice.payment_failed
- *      ✓ customer.subscription.trial_will_end
+ *   const data = { plan };
+ *   if (stripeCustomerId) data.stripeCustomerId = stripeCustomerId;
+ *   if (subscriptionId)   data.subscriptionId   = subscriptionId;
  *
- * 4. CHECKOUT PAGE
- *    Replace in alphaedge-checkout.html:
- *      STRIPE_CONFIG.publishableKey = 'pk_live_...'
- *      STRIPE_CONFIG.backendUrl = 'https://yourapi.com/api/create-subscription'
- *      STRIPE_CONFIG.prices = { ... } (same IDs as above)
+ *   await prisma.user.update({ where: { id: userId }, data });
+ *   res.json({ message: 'Plan updated.' });
+ * });
  *
- * 5. DATABASE SCHEMA (add to your users table)
- *    stripe_customer_id   VARCHAR
- *    subscription_id      VARCHAR
- *    plan                 ENUM('free', 'pro', 'elite')
- *    subscription_status  ENUM('active', 'trialing', 'past_due', 'canceled')
- *    current_period_end   TIMESTAMP
- *    cancel_at_period_end BOOLEAN
+ * ─────────────────────────────────────────────────────────────
+ * PRISMA SCHEMA — add these fields to your User model:
+ * ─────────────────────────────────────────────────────────────
  *
- * 6. TEST CARDS (Stripe test mode)
- *    Success:  4242 4242 4242 4242
- *    Decline:  4000 0000 0000 0002
- *    3D Secure: 4000 0027 6000 3184
- *    Any future expiry, any CVC
+ * model User {
+ *   ...existing fields...
+ *   stripeCustomerId  String?
+ *   subscriptionId    String?
+ * }
  *
- * ════════════════════════════════════════════════
+ * npx prisma migrate dev --name add_stripe_fields
+ * ─────────────────────────────────────────────────────────────
  */
