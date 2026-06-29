@@ -4,11 +4,11 @@ const path = require('path');
 
 console.log('Starting AlphaEdge backend...');
 
-// Auth server on PORT (Render expects this to be the main port)
+// Auth server - uses PORT env var set by Render
 const auth = spawn('node', [path.join(__dirname, 'alphaedge-auth.js')], {
   stdio: 'inherit', env: { ...process.env }
 });
-auth.on('exit', (code) => { console.log(`Auth server exited: ${code}`); process.exit(code); });
+auth.on('exit', (code) => { console.log(`Auth server exited: ${code}`); process.exit(code || 0); });
 console.log(`Auth server → port ${process.env.PORT || 3000}`);
 
 // Stripe server on 3001
@@ -18,12 +18,8 @@ const stripe = spawn('node', [path.join(__dirname, 'alphaedge-stripe-server.js')
 stripe.on('exit', (code) => console.log(`Stripe server exited: ${code}`));
 console.log('Stripe server → port 3001');
 
-// Bot in webhook mode — just initialize, no polling
+// Telegram bot - starts after 12s delay to let old instances die
 setTimeout(() => {
-  try {
-    require('./alphaedge-telegram-bot');
-    console.log('Telegram bot → webhook mode (no polling)');
-  } catch(err) {
-    console.error('Bot init error:', err.message);
-  }
-}, 3000);
+  console.log('Telegram bot → AlphaEdgeProBot starting...');
+  require('./alphaedge-telegram-bot');
+}, 12000);
