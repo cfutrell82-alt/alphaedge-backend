@@ -433,12 +433,10 @@ function safeUser(user) {
 // ─────────────────────────────────────────────
 // TELEGRAM WEBHOOK ENDPOINT
 // ─────────────────────────────────────────────
-app.post(\`/telegram-webhook/\${process.env.TELEGRAM_BOT_TOKEN}\`, async (req, res) => {
+app.post('/telegram-webhook', async (req, res) => {
   try {
-    const { bot, handleMessage, handleCallback } = require('./alphaedge-telegram-bot');
     const update = req.body;
-    if (update.message) await handleMessage(update.message);
-    if (update.callback_query) await handleCallback(update.callback_query);
+    console.log('[WEBHOOK] Update received:', JSON.stringify(update).substring(0, 100));
     res.status(200).json({ ok: true });
   } catch(err) {
     console.error('[WEBHOOK] Error:', err.message);
