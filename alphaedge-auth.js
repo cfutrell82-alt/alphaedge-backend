@@ -1,16 +1,15 @@
 require('dotenv').config();
-const express    = require('express');
-const bcrypt     = require('bcryptjs');
-const jwt        = require('jsonwebtoken');
-const crypto     = require('crypto');
-const cors       = require('cors');
-const axios      = require('axios');
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const cors = require('cors');
+const axios = require('axios');
 const nodemailer = require('nodemailer');
-const { OAuth2Client } = require('google-auth-library'); // NEW
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
-const app    = express();
+const app = express();
 
 app.use(cors({
   origin: ['https://alphaedgetrading.site', 'http://alphaedgetrading.site', 'https://cfutrell82-alt.github.io'],
@@ -21,24 +20,15 @@ app.use('/api/payments/ipn', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 const NOWPAYMENTS_API = 'https://api.nowpayments.io/v1';
-const FRONTEND_URL    = process.env.CLIENT_URL || 'https://alphaedgetrading.site';
-
-// ─────────────────────────────────────────────
-// GOOGLE OAUTH CLIENT                          NEW
-// ─────────────────────────────────────────────
-const googleClient = new OAuth2Client(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI
-);
+const FRONTEND_URL = process.env.CLIENT_URL || 'https://alphaedgetrading.site';
 
 // ─────────────────────────────────────────────
 // EMAIL TRANSPORTER
 // ─────────────────────────────────────────────
 const port = parseInt(process.env.EMAIL_PORT) || 465;
 const transporter = nodemailer.createTransport({
-  host:   process.env.EMAIL_HOST || 'smtp.resend.com',
-  port:   port,
+  host: process.env.EMAIL_HOST || 'smtp.resend.com',
+  port: port,
   secure: port === 465,
   auth: {
     user: process.env.EMAIL_USER || 'resend',
@@ -46,9 +36,13 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-transporter.verify((error) => {
-  if (error) console.error('[EMAIL] SMTP connection failed:', error.message);
-  else       console.log('[EMAIL] SMTP ready to send emails');
+// Verify transporter on startup
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('[EMAIL] SMTP connection failed:', error.message);
+  } else {
+    console.log('[EMAIL] SMTP ready to send emails');
+  }
 });
 
 const FROM = process.env.EMAIL_FROM || 'support@alphaedgetrading.site';
@@ -117,7 +111,7 @@ function resetEmail(firstName, resetLink) {
         <p style="color:#fdfdff;font-size:1rem;margin-bottom:16px;">Hey ${firstName},</p>
         <p style="color:#b7c0e8;line-height:1.7;margin-bottom:24px;">We received a request to reset your AlphaEdge password. Click the button below to set a new one. This link expires in <strong style="color:#f7c948;">30 minutes</strong>.</p>
         <a href="${resetLink}" style="display:block;text-align:center;padding:14px 28px;background:linear-gradient(90deg,#f7c948,#00e5ff);color:#02040a;border-radius:10px;font-weight:700;font-size:1rem;text-decoration:none;margin-bottom:20px;">Reset My Password →</a>
-        <p style="color:#3A4A6B;font-size:0.8rem;text-align:center;">If you didn't request this, you can safely ignore this email.</p>
+        <p style="color:#3A4A6B;font-size:0.8rem;text-align:center;">If you didn't request this, you can safely ignore this email. Your password won't change.</p>
       </div>
       <div style="text-align:center;padding-top:20px;border-top:1px solid #24335f;">
         <p style="color:#3A4A6B;font-size:0.78rem;">© 2026 AlphaEdge · <a href="${FRONTEND_URL}/alphaedge-terms.html" style="color:#3A4A6B;">Terms</a> · <a href="${FRONTEND_URL}/alphaedge-privacy.html" style="color:#3A4A6B;">Privacy</a></p>
@@ -188,7 +182,7 @@ function requireAuth(req, res, next) {
 }
 
 // ─────────────────────────────────────────────
-// AUTH ROUTES — EMAIL / PASSWORD
+// AUTH ROUTES
 // ─────────────────────────────────────────────
 app.post('/api/auth/signup', async (req, res) => {
   try {
@@ -200,13 +194,15 @@ app.post('/api/auth/signup', async (req, res) => {
     const existing = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (existing) return res.status(409).json({ error: 'An account with this email already exists.' });
 
-    const passwordHash  = await bcrypt.hash(password, 12);
-    const verifyToken   = crypto.randomBytes(32).toString('hex');
+    const passwordHash = await bcrypt.hash(password, 12);
+    const verifyToken = crypto.randomBytes(32).toString('hex');
 
     const user = await prisma.user.create({
       data: { firstName, lastName, email: email.toLowerCase(), passwordHash, plan: 'free', status: 'active', emailVerified: false, verifyToken }
     });
     await prisma.wallet.create({ data: { userId: user.id } });
+
+    // Send welcome email
     await sendEmail(email, 'Welcome to AlphaEdge! 🚀', welcomeEmail(firstName));
 
     console.log(`[SIGNUP] New user: ${email}`);
@@ -226,11 +222,6 @@ app.post('/api/auth/login', async (req, res) => {
     const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
     if (!user) return res.status(401).json({ error: 'Incorrect email or password.' });
     if (user.status === 'suspended') return res.status(403).json({ error: 'This account has been suspended.' });
-
-    // OAuth-only accounts have no password
-    if (!user.passwordHash) {
-      return res.status(400).json({ error: 'This account uses Google Sign-In. Please use the Google button to log in.' });
-    }
 
     const passwordMatch = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatch) return res.status(401).json({ error: 'Incorrect email or password.' });
@@ -254,12 +245,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
   if (!user) return res.json({ message: 'If an account exists, a reset link has been sent.' });
 
-  // Don't send reset links to OAuth-only accounts
-  if (!user.passwordHash) {
-    return res.json({ message: 'If an account exists, a reset link has been sent.' });
-  }
-
-  const resetToken   = crypto.randomBytes(32).toString('hex');
+  const resetToken = crypto.randomBytes(32).toString('hex');
   const resetExpires = new Date(Date.now() + 30 * 60 * 1000);
   await prisma.user.update({ where: { id: user.id }, data: { resetToken, resetExpires } });
 
@@ -285,96 +271,14 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 app.post('/api/user/update-plan', async (req, res) => {
-  const { userId, plan, stripeCustomerId, subscriptionId } = req.body;
+  const { userId, plan } = req.body;
   if (!userId || !plan) return res.status(400).json({ error: 'userId and plan are required.' });
-
-  const data = { plan };
-  if (stripeCustomerId) data.stripeCustomerId = stripeCustomerId;
-  if (subscriptionId)   data.subscriptionId   = subscriptionId;
-
-  await prisma.user.update({ where: { id: userId }, data });
+  await prisma.user.update({ where: { id: userId }, data: { plan } });
   res.json({ message: 'Plan updated.' });
 });
 
-// ─────────────────────────────────────────────
-// AUTH ROUTES — GOOGLE OAUTH                   NEW
-// ─────────────────────────────────────────────
-
-// Step 1 — user clicks "Sign in with Google" → lands here → redirect to Google
 app.get('/api/auth/google', (req, res) => {
-  const url = googleClient.generateAuthUrl({
-    access_type: 'offline',
-    scope:       ['openid', 'email', 'profile'],
-    prompt:      'select_account',
-  });
-  res.redirect(url);
-});
-
-// Step 2 — Google redirects back here after the user approves
-app.get('/api/auth/google/callback', async (req, res) => {
-  const { code, error } = req.query;
-
-  if (error || !code) {
-    console.error('[GOOGLE OAUTH] Denied or missing code:', error);
-    return res.redirect(`${FRONTEND_URL}/alphaedge-login.html?error=google_denied`);
-  }
-
-  try {
-    const { tokens } = await googleClient.getToken(code);
-    googleClient.setCredentials(tokens);
-
-    const ticket = await googleClient.verifyIdToken({
-      idToken:  tokens.id_token,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
-    const payload = ticket.getPayload();
-    const { sub: googleId, email, given_name: firstName, family_name: lastName, picture } = payload;
-
-    if (!email) {
-      return res.redirect(`${FRONTEND_URL}/alphaedge-login.html?error=no_email`);
-    }
-
-    let user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
-
-    if (user) {
-      // Existing user — link their Google ID if not already stored
-      if (!user.googleId) {
-        user = await prisma.user.update({
-          where: { id: user.id },
-          data:  { googleId, avatar: picture || user.avatar },
-        });
-      }
-      await prisma.user.update({ where: { id: user.id }, data: { lastLogin: new Date() } });
-    } else {
-      // Brand new user — create their account automatically
-      user = await prisma.user.create({
-        data: {
-          firstName:     firstName || 'AlphaEdge',
-          lastName:      lastName  || 'User',
-          email:         email.toLowerCase(),
-          googleId,
-          avatar:        picture || null,
-          passwordHash:  '',       // no password — they log in via Google
-          plan:          'free',
-          status:        'active',
-          emailVerified: true,     // Google already confirmed the email
-          verifyToken:   null,
-        },
-      });
-      await prisma.wallet.create({ data: { userId: user.id } });
-      await sendEmail(email, 'Welcome to AlphaEdge! 🚀', welcomeEmail(user.firstName));
-      console.log(`[GOOGLE OAUTH] New user created: ${email}`);
-    }
-
-    // Send them to the dashboard — React picks up the token from the URL
-    const token = signToken(user.id);
-    console.log(`[GOOGLE OAUTH] Login success: ${email}`);
-    res.redirect(`${FRONTEND_URL}/alphaedge-dashboard.html?token=${token}&oauth=google`);
-
-  } catch (err) {
-    console.error('[GOOGLE OAUTH ERROR]', err.message);
-    res.redirect(`${FRONTEND_URL}/alphaedge-login.html?error=google_failed`);
-  }
+  res.status(501).json({ error: 'Google OAuth not yet configured.' });
 });
 
 // ─────────────────────────────────────────────
@@ -385,9 +289,9 @@ app.get('/api/wallet', requireAuth, async (req, res) => {
     let wallet = await prisma.wallet.findUnique({ where: { userId: req.user.id } });
     if (!wallet) wallet = await prisma.wallet.create({ data: { userId: req.user.id } });
     const transactions = await prisma.transaction.findMany({
-      where:   { userId: req.user.id },
+      where: { userId: req.user.id },
       orderBy: { createdAt: 'desc' },
-      take:    20,
+      take: 20
     });
     res.json({ wallet, transactions });
   } catch (err) {
@@ -405,14 +309,14 @@ app.post('/api/payments/create', requireAuth, async (req, res) => {
     if (!currency || !amount) return res.status(400).json({ error: 'currency and amount are required.' });
 
     const response = await axios.post(`${NOWPAYMENTS_API}/payment`, {
-      price_amount:       amount,
-      price_currency:     'usd',
-      pay_currency:       currency.toLowerCase(),
-      order_id:           `ae_${req.user.id}_${Date.now()}`,
-      order_description:  description || `AlphaEdge deposit — ${req.user.email}`,
-      ipn_callback_url:   `https://alphaedge-backend-uu13.onrender.com/api/payments/ipn`,
-      success_url:        `${FRONTEND_URL}/alphaedge-wallet.html?deposit=success`,
-      cancel_url:         `${FRONTEND_URL}/alphaedge-wallet.html?deposit=cancelled`,
+      price_amount: amount,
+      price_currency: 'usd',
+      pay_currency: currency.toLowerCase(),
+      order_id: `ae_${req.user.id}_${Date.now()}`,
+      order_description: description || `AlphaEdge deposit — ${req.user.email}`,
+      ipn_callback_url: `https://alphaedge-backend-production.up.railway.app/api/payments/ipn`,
+      success_url: `${FRONTEND_URL}/alphaedge-wallet.html?deposit=success`,
+      cancel_url: `${FRONTEND_URL}/alphaedge-wallet.html?deposit=cancelled`,
     }, {
       headers: { 'x-api-key': process.env.NOWPAYMENTS_API_KEY, 'Content-Type': 'application/json' }
     });
@@ -420,22 +324,22 @@ app.post('/api/payments/create', requireAuth, async (req, res) => {
     const payment = response.data;
     await prisma.transaction.create({
       data: {
-        userId:   req.user.id,
-        type:     'deposit',
+        userId: req.user.id,
+        type: 'deposit',
         currency: currency.toUpperCase(),
-        amount:   parseFloat(payment.pay_amount || 0),
+        amount: parseFloat(payment.pay_amount || 0),
         usdValue: parseFloat(amount),
-        status:   'pending',
-        txHash:   payment.payment_id?.toString(),
+        status: 'pending',
+        txHash: payment.payment_id?.toString(),
       }
     });
 
     res.json({
-      paymentId:   payment.payment_id,
-      payAddress:  payment.pay_address,
-      payAmount:   payment.pay_amount,
+      paymentId: payment.payment_id,
+      payAddress: payment.pay_address,
+      payAmount: payment.pay_amount,
       payCurrency: payment.pay_currency,
-      status:      payment.payment_status,
+      status: payment.payment_status,
     });
   } catch (err) {
     console.error('[PAYMENT CREATE ERROR]', err.response?.data || err.message);
@@ -448,7 +352,7 @@ app.get('/api/payments/currencies', async (req, res) => {
     const response = await axios.get(`${NOWPAYMENTS_API}/currencies`, {
       headers: { 'x-api-key': process.env.NOWPAYMENTS_API_KEY }
     });
-    const common   = ['btc', 'eth', 'usdt', 'usdc', 'sol', 'bnb', 'xrp'];
+    const common = ['btc', 'eth', 'usdt', 'usdc', 'sol', 'bnb', 'xrp'];
     const filtered = response.data.currencies?.filter(c => common.includes(c.toLowerCase())) || common;
     res.json({ currencies: filtered });
   } catch (err) {
@@ -459,9 +363,9 @@ app.get('/api/payments/currencies', async (req, res) => {
 app.post('/api/payments/ipn', async (req, res) => {
   try {
     const receivedSig = req.headers['x-nowpayments-sig'];
-    const body        = req.body.toString();
-    const hmac        = crypto.createHmac('sha512', process.env.NOWPAYMENTS_IPN_SECRET || '');
-    const sortedBody  = JSON.stringify(JSON.parse(body), Object.keys(JSON.parse(body)).sort());
+    const body = req.body.toString();
+    const hmac = crypto.createHmac('sha512', process.env.NOWPAYMENTS_IPN_SECRET || '');
+    const sortedBody = JSON.stringify(JSON.parse(body), Object.keys(JSON.parse(body)).sort());
     hmac.update(sortedBody);
     const expectedSig = hmac.digest('hex');
 
@@ -477,12 +381,12 @@ app.post('/api/payments/ipn', async (req, res) => {
         await prisma.transaction.update({ where: { id: transaction.id }, data: { status: 'completed' } });
         const wallet = await prisma.wallet.findUnique({ where: { userId: transaction.userId } });
         if (wallet) {
-          const currency    = transaction.currency.toLowerCase();
-          const updateData  = {};
-          if (currency === 'btc')                         updateData.btcBalance  = wallet.btcBalance + transaction.amount;
-          else if (currency === 'eth')                    updateData.ethBalance  = wallet.ethBalance + transaction.amount;
+          const currency = transaction.currency.toLowerCase();
+          const updateData = {};
+          if (currency === 'btc') updateData.btcBalance = wallet.btcBalance + transaction.amount;
+          else if (currency === 'eth') updateData.ethBalance = wallet.ethBalance + transaction.amount;
           else if (currency === 'usdc' || currency === 'usdt') updateData.usdcBalance = wallet.usdcBalance + transaction.usdValue;
-          else if (currency === 'sol')                    updateData.solBalance  = wallet.solBalance + transaction.amount;
+          else if (currency === 'sol') updateData.solBalance = wallet.solBalance + transaction.amount;
           await prisma.wallet.update({ where: { userId: transaction.userId }, data: updateData });
         }
       }
@@ -495,7 +399,7 @@ app.post('/api/payments/ipn', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// SIGNAL EMAIL BROADCAST
+// SIGNAL EMAIL BROADCAST (internal use)
 // ─────────────────────────────────────────────
 app.post('/api/signals/broadcast-email', async (req, res) => {
   try {
@@ -525,30 +429,25 @@ function safeUser(user) {
   return safe;
 }
 
+
 // ─────────────────────────────────────────────
-// TELEGRAM WEBHOOK
+// TELEGRAM WEBHOOK ENDPOINT
 // ─────────────────────────────────────────────
 app.post('/telegram-webhook', async (req, res) => {
   try {
     const update = req.body;
     console.log('[WEBHOOK] Update received:', JSON.stringify(update).substring(0, 100));
     res.status(200).json({ ok: true });
-  } catch (err) {
+  } catch(err) {
     console.error('[WEBHOOK] Error:', err.message);
     res.status(200).json({ ok: true });
   }
 });
 
-// ─────────────────────────────────────────────
-// HEALTH CHECK
-// ─────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'alphaedge-api', uptime: process.uptime() });
 });
 
-// ─────────────────────────────────────────────
-// START
-// ─────────────────────────────────────────────
 async function main() {
   try {
     await prisma.$connect();
@@ -562,30 +461,4 @@ main();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`AlphaEdge Auth API running on port ${PORT}`);
-  const googleReady = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
-  console.log(`Google OAuth: ${googleReady ? '✅ configured' : '❌ missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET'}`);
 });
-
-/**
- * ─────────────────────────────────────────────
- * AFTER REPLACING THIS FILE:
- *
- * 1. npm install google-auth-library
- *
- * 2. Add to your Prisma schema (prisma/schema.prisma):
- *    model User {
- *      ...existing fields...
- *      googleId          String?  @unique
- *      avatar            String?
- *      stripeCustomerId  String?
- *      subscriptionId    String?
- *    }
- *
- * 3. npx prisma migrate dev --name add_google_and_stripe_fields
- *
- * 4. Add to .env on Render:
- *    GOOGLE_CLIENT_ID=...
- *    GOOGLE_CLIENT_SECRET=...
- *    GOOGLE_REDIRECT_URI=https://alphaedge-backend-uu13.onrender.com/api/auth/google/callback
- * ─────────────────────────────────────────────
- */
