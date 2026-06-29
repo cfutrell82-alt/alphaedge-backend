@@ -25,10 +25,8 @@ model User {
   lastLogin       DateTime?
   googleId         String?  @unique
   avatar           String?
-  stripeCustomerId String?
   subscriptionId   String?
 }
-
 model Wallet {
   id          String   @id @default(uuid())
   userId      String   @unique
