@@ -443,30 +443,6 @@ app.post('/telegram-webhook', async (req, res) => {
 });
 
 
-// ─────────────────────────────────────────────
-// TEMP ADMIN: LOAD WALLET (remove after use)
-// ─────────────────────────────────────────────
-app.get('/api/admin/load-wallet', async (req, res) => {
-  try {
-    const { email, secret, btc, eth, usdc, sol } = req.query;
-    if (secret !== 'alphaedge_temp_2026') return res.status(401).json({ error: 'Unauthorized' });
-    const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    const wallet = await prisma.wallet.update({
-      where: { userId: user.id },
-      data: {
-        btcBalance: parseFloat(btc) || 0,
-        ethBalance: parseFloat(eth) || 0,
-        usdcBalance: parseFloat(usdc) || 0,
-        solBalance: parseFloat(sol) || 0,
-      }
-    });
-    res.json({ message: 'Wallet loaded!', wallet });
-  } catch(err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'alphaedge-api', uptime: process.uptime() });
 });
