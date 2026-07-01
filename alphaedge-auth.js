@@ -483,7 +483,7 @@ app.get('/api/auth/google', (req, res) => {
 
 app.get('/api/auth/google/callback', async (req, res) => {
   const { code } = req.query;
-  if (!code) return res.redirect(`${FRONTEND_URL}/alphaedge-login.html?error=google_failed`);
+  if (!code) return res.redirect(`${FRONTEND_URL}/slickoptions-login.html?error=google_failed`);
   try {
     // Exchange code for tokens
     const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
@@ -525,9 +525,9 @@ app.get('/api/auth/google/callback', async (req, res) => {
 
     const token = signToken(user.id);
     // Redirect to dashboard with token
-    res.redirect(`${FRONTEND_URL}/alphaedge-dashboard.html?token=${token}&user=${encodeURIComponent(JSON.stringify(safeUser(user)))}`);
+    res.redirect(`${FRONTEND_URL}/slickoptions-dashboard.html?token=${token}&user=${encodeURIComponent(JSON.stringify(safeUser(user)))}`);
   } catch(err) {
     console.error('[GOOGLE AUTH ERROR]', err.message);
-    res.redirect(`${FRONTEND_URL}/alphaedge-login.html?error=google_failed`);
+    res.redirect(`${FRONTEND_URL}/slickoptions-login.html?error=google_failed`);
   }
 });
